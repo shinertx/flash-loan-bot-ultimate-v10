@@ -1,1 +1,22 @@
+profitThreshold: 5000
+use_flashbots: true
+decoy_transactions_enabled: true
+off_peak_hours: [1,2,3,4]
+dynamic_gas: true
+maxDailyLoss: 1000
+circuit_breaker_enabled: true
+test_mode: true
+
+fallback_oracles:
+  - band
+  - uma
+
+ethical_constraints:
+  max_slippage: 0.5%
+  blacklisted_pools: []
+  min_profit_to_act: 100
+
+strategy_rotation_pairs:
+  - {pair: "USDC-DAI", chain: "arbitrum"}
+  - {pair: "DAI-USDT", chain: "polygon"}
 
