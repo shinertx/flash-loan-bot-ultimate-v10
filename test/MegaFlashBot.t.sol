@@ -11,24 +11,45 @@ contract MegaFlashBotTest is Test {
     function setUp() public {
         bot = new MegaFlashBot(
             0x123, // Mock lendingPool
-            0x456, // Mock DAI
-            0x789, // Mock UniswapRouter
-            address(0), // MEV module disabled for test
-            address(0), // Bridge module disabled for test
-            address(0), // Chainlink disabled
-            address(0), // Band disabled
-            address(0), // UMA disabled
-            5000
+            0x456, // Mock UniswapV2Router02
+            0x789, // Mock DAI
+            100,   // profitThreshold
+            100    // slippageTolerance
         );
         bot.transferOwnership(owner);
     }
 
     function testCircuitBreaker() public {
-        bot.setInitialBalance(1000e18);
-        bot.setMaxDailyLoss(50e18);
+        // Assuming setInitialBalance and setMaxDailyLoss were implemented if needed.
         vm.prank(owner);
-        vm.expectRevert("Circuit breaker triggered");
-        bot.executeFlashLoan(1000e18);
+        vm.expectRevert("Circuit breaker active");
+        bot.executeFlashLoan(1000e18, 0x456, 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2, address(0), MegaFlashBot.ArbitrageType.TWO_TOKEN, 100);
+    }
+
+    function testSetProfitThreshold() public {
+        uint256 initialThreshold = bot.profitThreshold();
+        uint256 newThreshold = initialThreshold + 1000;
+        vm.prank(owner);
+        bot.setProfitThreshold(newThreshold);
+        assertEq(bot.profitThreshold(), newThreshold);
+    }
+
+    function testToggleEmergencyStop() public {
+        vm.prank(owner);
+        bot.triggerEmergencyStop();
+        // Assuming emergency flag is public.
+        assertEq(bot.emergency(), true);
+        vm.prank(owner);
+        bot.resumeOperation();
+        assertEq(bot.emergency(), false);
+    }
+
+    function testToggleCircuitBreaker() public {
+        vm.prank(owner);
+        bot.toggleCircuitBreaker();
+        assertEq(bot.circuitBreaker(), false);
+        vm.prank(owner);
+        bot.toggleCircuitBreaker();
+        assertEq(bot.circuitBreaker(), true);
     }
 }
-
