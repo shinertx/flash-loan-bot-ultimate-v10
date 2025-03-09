@@ -1,14 +1,14 @@
 require('dotenv').config();
 require('@nomicfoundation/hardhat-toolbox');
 
-const { RPC_URL, WALLET_PRIVATE_KEY } = process.env;
+const { RPC_URL, PRIVATE_KEY } = process.env;
 
 module.exports = {
   solidity: "0.8.19",
   networks: {
     sepolia: {
       url: RPC_URL,
-      accounts: [WALLET_PRIVATE_KEY]
+      accounts: [PRIVATE_KEY]
     },
     hardhat: {
       forking: {
@@ -19,4 +19,3 @@ module.exports = {
     }
   }
 };
-
