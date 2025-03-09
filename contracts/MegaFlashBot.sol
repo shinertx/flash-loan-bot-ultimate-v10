@@ -19,8 +19,21 @@ error EmergencyStopActive();
 error InvalidArbitrageType();
 error NoProfit();
 
-// NEW: Define a custom error for low liquidity.
-error LowLiquidity(uint256 available, uint256 minRequired);
+// NEW: Internal liquidity validation function.
+function validateLiquidity(address tokenA, address tokenB, uint256 minLiquidity) internal view {
+    // Get the factory address from the Uniswap router.
+    address factory = IUniswapV2Router02(uniswapV2Router).factory();
+    // Get the pair address from the factory.
+    address pair = IUniswapV2Factory(factory).getPair(tokenA, tokenB);
+    if (pair == address(0)) revert InvalidPath();
+    // Retrieve reserves from the pair contract.
+    (uint112 reserve0, uint112 reserve1, ) = IUniswapV2Pair(pair).getReserves();
+    // Check if either reserve is below the minimum liquidity.
+    if (reserve0 < minLiquidity || reserve1 < minLiquidity) {
+        uint256 available = reserve0 < minLiquidity ? reserve0 : reserve1;
+        revert LowLiquidity(available, minLiquidity);
+    }
+}
 
 contract MegaFlashBot is IFlashLoanSimpleReceiver, Ownable, ReentrancyGuard {
     using SafeERC20 for IERC20;
