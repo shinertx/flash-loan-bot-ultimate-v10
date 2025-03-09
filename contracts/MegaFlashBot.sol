@@ -19,6 +19,9 @@ error EmergencyStopActive();
 error InvalidArbitrageType();
 error NoProfit();
 
+// NEW: Define a custom error for low liquidity.
+error LowLiquidity(uint256 available, uint256 minRequired);
+
 contract MegaFlashBot is IFlashLoanSimpleReceiver, Ownable, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
