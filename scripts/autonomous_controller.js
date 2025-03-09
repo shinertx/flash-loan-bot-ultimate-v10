@@ -1,9 +1,3 @@
-/**
- * autonomous_controller.js
- *
- * Continuously monitors MegaFlashBot events and polls the AI controller.
- * Triggers flash loan trades if the AI recommends trading.
- */
 const { ethers } = require("hardhat");
 const axios = require("axios");
 require('dotenv').config();
@@ -18,7 +12,6 @@ async function main() {
     const bot = await ethers.getContractAt("MegaFlashBot", BOT_ADDRESS, owner);
     console.log("Autonomous Controller started for MegaFlashBot at", BOT_ADDRESS);
 
-    // Listen for emergency events.
     bot.on("EmergencyStopTriggered", () => {
         console.log("Emergency stop triggered! Operations halted.");
     });
@@ -26,7 +19,6 @@ async function main() {
         console.log("Emergency stop released! Resuming operations.");
     });
 
-    // Autonomous loop: poll the AI controller every 60 seconds.
     setInterval(async () => {
         try {
             const response = await axios.get(process.env.AI_CONTROLLER_URL);
@@ -34,7 +26,13 @@ async function main() {
             console.log("AI Prediction:", prediction);
             if (prediction.action === "trade") {
                 console.log("AI recommends trading. Executing flash loan...");
-                const tx = await bot.executeFlashLoan(ethers.utils.parseEther("1000"));
+                const tx = await bot.executeFlashLoan(
+                    ethers.utils.parseEther("1000"),
+                    process.env.DAI_ADDRESS,
+                    "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+                    ethers.constants.AddressZero,
+                    0
+                );
                 await tx.wait();
                 console.log("Flash loan executed.");
             } else {
@@ -50,4 +48,3 @@ main().catch((error) => {
     console.error("Autonomous Controller failed:", error);
     process.exit(1);
 });
-
