@@ -28,4 +28,12 @@ async function executeArbitrage(provider, bot, tradeDetails, owner, arbType = 0)
             maxPriorityFeePerGas = ethers.utils.parseUnits("2", "gwei");
         } catch (fallbackError) {
             console.error("Fallback gas oracle failed. Using default values.");
-           
+            maxFeePerGas = ethers.utils.parseUnits("100", "gwei");
+            maxPriorityFeePerGas = ethers.utils.parseUnits("2", "gwei");
+        }
+    }
+
+    // Rest of the function remains unchanged...
+}
+
+module.exports = { executeArbitrage };
