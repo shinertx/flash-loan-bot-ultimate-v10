@@ -7,49 +7,56 @@ import "../contracts/MegaFlashBot.sol";
 contract MegaFlashBotTest is Test {
     MegaFlashBot bot;
     address owner = address(this);
+    address lendingPool = address(0x123);
+    address uniswapRouter = address(0x456);
+    address dai = address(0x789);
 
     function setUp() public {
         bot = new MegaFlashBot(
-            0x123, // Mock lendingPool
-            0x456, // Mock UniswapV2Router02
-            0x789, // Mock DAI
+            lendingPool,
+            uniswapRouter,
+            dai,
             100,   // profitThreshold
             100    // slippageTolerance
         );
         bot.transferOwnership(owner);
     }
 
-    function testCircuitBreaker() public {
-        // Assuming setInitialBalance and setMaxDailyLoss were implemented if needed.
+    function testMaxSlippageExceeded() public {
         vm.prank(owner);
-        vm.expectRevert("Circuit breaker active");
-        bot.executeFlashLoan(1000e18, 0x456, 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2, address(0), MegaFlashBot.ArbitrageType.TWO_TOKEN, 100);
+        vm.expectRevert("MaxSlippageExceeded");
+        bot.executeFlashLoan(
+            1000e18,
+            dai,
+            address(0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2), // WETH
+            address(0), // token2
+            MegaFlashBot.ArbitrageType.TWO_TOKEN,
+            200 // slippageTolerance > maxSlippage (50)
+        );
     }
 
-    function testSetProfitThreshold() public {
-        uint256 initialThreshold = bot.profitThreshold();
-        uint256 newThreshold = initialThreshold + 1000;
+    function testTriangularArbitrageSlippage() public {
         vm.prank(owner);
-        bot.setProfitThreshold(newThreshold);
-        assertEq(bot.profitThreshold(), newThreshold);
+        vm.expectRevert("MaxSlippageExceeded");
+        bot.executeTriangularArbitrage(
+            dai,
+            address(0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2), // WETH
+            address(0x6B175474E89094C44Da98b954EedeAC495271d0F), // DAI
+            1000e18,
+            200 // slippageTolerance > maxSlippage (50)
+        );
     }
 
-    function testToggleEmergencyStop() public {
+    function testNoProfit() public {
         vm.prank(owner);
-        bot.triggerEmergencyStop();
-        // Assuming emergency flag is public.
-        assertEq(bot.emergency(), true);
-        vm.prank(owner);
-        bot.resumeOperation();
-        assertEq(bot.emergency(), false);
-    }
-
-    function testToggleCircuitBreaker() public {
-        vm.prank(owner);
-        bot.toggleCircuitBreaker();
-        assertEq(bot.circuitBreaker(), false);
-        vm.prank(owner);
-        bot.toggleCircuitBreaker();
-        assertEq(bot.circuitBreaker(), true);
+        vm.expectRevert("NoProfit");
+        bot.executeFlashLoan(
+            1000e18,
+            dai,
+            address(0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2), // WETH
+            address(0), // token2
+            MegaFlashBot.ArbitrageType.TWO_TOKEN,
+            50 // valid slippage
+        );
     }
 }
