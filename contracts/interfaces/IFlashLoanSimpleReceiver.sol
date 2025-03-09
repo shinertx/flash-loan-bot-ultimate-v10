@@ -9,4 +9,3 @@ interface IFlashLoanSimpleReceiver {
         bytes calldata params
     ) external returns (bool);
 }
-
