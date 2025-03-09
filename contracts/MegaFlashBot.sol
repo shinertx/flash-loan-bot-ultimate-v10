@@ -189,38 +189,52 @@ contract MegaFlashBot is IFlashLoanSimpleReceiver, Ownable, ReentrancyGuard {
     }
 
     function executeOperation(
-        address asset,
-        uint256 amount,
-        uint256 premium,
-        address,
-        bytes calldata params
-    ) external override nonReentrant checkCircuitBreaker notEmergency returns (bool) {
-        if(msg.sender != lendingPool) revert FlashLoanFailed("Sender not lending pool");
-        if(asset != dai) revert FlashLoanFailed("Asset not dai");
+    address asset,
+    uint256 amount,
+    uint256 premium,
+    address, // initiator parameter (unused)
+    bytes calldata params
+) external override nonReentrant checkCircuitBreaker notEmergency returns (bool) {
+    if (msg.sender != lendingPool) revert FlashLoanFailed("Sender not lending pool");
+    if (asset != dai) revert FlashLoanFailed("Asset not dai");
 
-        (ArbitrageType arbType, address token0, address token1, address token2, uint256 amountIn, uint256 _slippageTolerance)
-            = abi.decode(params, (ArbitrageType, address, address, address, uint256, uint256));
+    // Decode parameters from the flash loan call.
+    (ArbitrageType arbType, address token0, address token1, address token2, uint256 amountIn, uint256 _slippageTolerance)
+        = abi.decode(params, (ArbitrageType, address, address, address, uint256, uint256));
 
-        uint256 balanceBefore = IERC20(dai).balanceOf(address(this));
-        if (arbType == ArbitrageType.TWO_TOKEN) {
-            _executeTradeWithSlippage(amountIn, token0, token1, _slippageTolerance);
-        } else if (arbType == ArbitrageType.THREE_TOKEN) {
-            executeTriangularArbitrage(token0, token1, token2, amountIn, _slippageTolerance);
-        } else {
-            revert InvalidArbitrageType();
-        }
-        uint256 balanceAfter = IERC20(dai).balanceOf(address(this));
-        uint256 totalOwed = amount + premium;
-        if (balanceAfter < totalOwed) revert InsufficientBalance(totalOwed, balanceAfter);
-        if (balanceAfter < totalOwed + profitThreshold) revert InsufficientProfit(profitThreshold, balanceAfter - totalOwed);
-        uint256 profit = balanceAfter - totalOwed;
-        IERC20(dai).safeTransfer(owner(), profit);
-        IERC20(dai).safeApprove(address(lendingPool), 0);
-        IERC20(dai).safeApprove(address(lendingPool), totalOwed);
-        emit TradeExecuted(amount, profit);
-        emit RepaymentExecuted(asset, totalOwed);
-        return true;
+    uint256 balanceBefore = IERC20(dai).balanceOf(address(this));
+
+    // OPTIONAL: Validate liquidity for the primary trading pair.
+    // Uncomment and adjust the minimum liquidity threshold as needed.
+    // validateLiquidity(token0, token1, 1000e18);
+
+    // Execute the appropriate trade based on the arbitrage type.
+    if (arbType == ArbitrageType.TWO_TOKEN) {
+        _executeTradeWithSlippage(amountIn, token0, token1, _slippageTolerance);
+    } else if (arbType == ArbitrageType.THREE_TOKEN) {
+        executeTriangularArbitrage(token0, token1, token2, amountIn, _slippageTolerance);
+    } else {
+        revert InvalidArbitrageType();
     }
+    
+    uint256 balanceAfter = IERC20(dai).balanceOf(address(this));
+    // Calculate the total owed: original flash loan amount plus the premium.
+    uint256 totalOwed = amount + premium;
+    
+    if (balanceAfter < totalOwed) revert InsufficientBalance(totalOwed, balanceAfter);
+    if (balanceAfter < totalOwed + profitThreshold) revert InsufficientProfit(profitThreshold, balanceAfter - totalOwed);
+    uint256 profit = balanceAfter - totalOwed;
+    
+    // Transfer profit to the owner.
+    IERC20(dai).safeTransfer(owner(), profit);
+    // Approve the lending pool to pull the owed amount.
+    IERC20(dai).safeApprove(address(lendingPool), 0);
+    IERC20(dai).safeApprove(address(lendingPool), totalOwed);
+    
+    emit TradeExecuted(amount, profit);
+    emit RepaymentExecuted(asset, totalOwed);
+    return true;
+}
 
     function _executeTradeWithSlippage(
         uint256 amountIn,
