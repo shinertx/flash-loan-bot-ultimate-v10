@@ -21,9 +21,8 @@ contract BridgeModule is Ownable {
         IERC20(token).safeApprove(axelarGateway, amount);
         IAxelarGateway(axelarGateway).callContract(
             "destinationChain",
-            "0xRecipientOnDestChain", // Replace with the actual destination contract
+            "0xRecipientOnDestChain",
             abi.encode(token, amount)
         );
     }
 }
-
