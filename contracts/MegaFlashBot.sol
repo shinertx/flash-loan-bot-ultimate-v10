@@ -60,7 +60,6 @@ contract MegaFlashBot is IFlashLoanSimpleReceiver, Ownable, ReentrancyGuard {
         _;
     }
 
-    // Constructor now accepts _profitThreshold and _slippageTolerance.
     constructor(
         address _lendingPool,
         address _uniswapV2Router,
@@ -129,7 +128,6 @@ contract MegaFlashBot is IFlashLoanSimpleReceiver, Ownable, ReentrancyGuard {
 
     enum ArbitrageType { TWO_TOKEN, THREE_TOKEN }
 
-    // Modified executeFlashLoan now accepts token2 and arbType, and checks for profit.
     function executeFlashLoan(
         uint256 amount,
         address token0,
@@ -138,6 +136,9 @@ contract MegaFlashBot is IFlashLoanSimpleReceiver, Ownable, ReentrancyGuard {
         ArbitrageType arbType,
         uint256 _slippageTolerance
     ) external onlyOwner nonReentrant checkCircuitBreaker notEmergency returns (bool) {
+        // Add slippage validation
+        if (_slippageTolerance > maxSlippage) revert MaxSlippageExceeded();
+
         uint256 finalAmount = amount;
         if (arbType == ArbitrageType.THREE_TOKEN) {
             // Simulate triangular arbitrage expected final amount.
@@ -171,7 +172,6 @@ contract MegaFlashBot is IFlashLoanSimpleReceiver, Ownable, ReentrancyGuard {
         return true;
     }
 
-    // Modified executeOperation decodes new params and chooses the arb type.
     function executeOperation(
         address asset,
         uint256 amount,
@@ -206,7 +206,6 @@ contract MegaFlashBot is IFlashLoanSimpleReceiver, Ownable, ReentrancyGuard {
         return true;
     }
 
-    // Internal function: dynamic slippage-controlled trade.
     function _executeTradeWithSlippage(
         uint256 amountIn,
         address tokenIn,
@@ -230,7 +229,6 @@ contract MegaFlashBot is IFlashLoanSimpleReceiver, Ownable, ReentrancyGuard {
         );
     }
 
-    // New: Triangular arbitrage function with slippage control.
     function executeTriangularArbitrage(
         address tokenA,
         address tokenB,
@@ -238,6 +236,9 @@ contract MegaFlashBot is IFlashLoanSimpleReceiver, Ownable, ReentrancyGuard {
         uint256 amountIn,
         uint256 _slippageTolerance
     ) public onlyOwner nonReentrant {
+        // Add slippage validation
+        if (_slippageTolerance > maxSlippage) revert MaxSlippageExceeded();
+
         address[] memory path1 = new address[](2);
         path1[0] = tokenA;
         path1[1] = tokenB;
