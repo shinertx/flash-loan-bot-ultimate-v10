@@ -1,6 +1,7 @@
 const { ethers } = require("hardhat");
 require('dotenv').config();
-const { calculateUniswapV2Output, calculateUniswapV2Input} = require('../utils/arbitrage_utils');
+const { calculateUniswapV2Output, calculateUniswapV2Input } = require('../utils/arbitrage_utils');
+const WebSocket = require('ws'); // Import the 'ws' library
 
 async function main() {
     console.log("=== Mempool Listener: Monitoring for Arbitrage Opportunities ===");
@@ -17,71 +18,71 @@ async function main() {
     }
 
     async function addPairListeners(pairAddress, provider) {
-      const pairContract = new ethers.Contract(pairAddress, require('../abis/IUniswapV2Pair.json'), provider);
-      let token0, token1;
-      try {
-        [token0, token1] = await Promise.all([pairContract.token0(), pairContract.token1()]);
-      } catch (error) {
-        console.error(`Error fetching tokens for pair ${pairAddress}:`, error);
-        return; // Don't add listeners if we can't get token info
-      }
+        const pairContract = new ethers.Contract(pairAddress, require('../abis/IUniswapV2Pair.json'), provider);
+        let token0, token1;
+        try {
+            [token0, token1] = await Promise.all([pairContract.token0(), pairContract.token1()]);
+        } catch (error) {
+            console.error(`Error fetching tokens for pair ${pairAddress}:`, error);
+            return; // Don't add listeners if we can't get token info
+        }
         token0 = token0.toLowerCase();
         token1 = token1.toLowerCase();
 
-      if (![token0, token1].includes(DAI) && ![token0, token1].includes(WETH)) {
-        console.log(`Skipping pair ${pairAddress} (no DAI or WETH)`);
-        return;
-      }
+        if (![token0, token1].includes(DAI) && ![token0, token1].includes(WETH)) {
+            console.log(`Skipping pair ${pairAddress} (no DAI or WETH)`);
+            return;
+        }
         console.log(`Adding listeners for pair: <span class="math-inline">\{pairAddress\} \(</span>{token0}/${token1})`);
 
-      // --- Listen for Sync events ---
-      pairContract.on("Sync", async (reserve0, reserve1) => {
-        // console.log(`Sync event on pair: ${pairAddress}`); //Reduce logging
+        // --- Listen for Sync events ---
+        pairContract.on("Sync", async (reserve0, reserve1) => {
+            // console.log(`Sync event on pair: ${pairAddress}`); //Reduce logging
 
-        const blockNumber = await provider.getBlockNumber();
-        // Ensure consistent token order
-        if(token0 != (await pairContract.token0()).toLowerCase()){
-              [reserve0, reserve1] = [reserve1, reserve0];
-        }
+            const blockNumber = await provider.getBlockNumber();
+            // Ensure consistent token order
+            if (token0 != (await pairContract.token0()).toLowerCase()) {
+                [reserve0, reserve1] = [reserve1, reserve0];
+            }
 
-        pairDataCache[pairAddress.toLowerCase()] = {
-            token0,
-            token1,
-            reserve0,
-            reserve1,
-            lastUpdateBlock: blockNumber,
-            lastChecked: Date.now() // Add this line
-        };
-          //Asynchronously check for arbitrage.
-          processSwap(pairAddress, reserve0, reserve1, token0, token1, pairContract.address);
-      });
+            pairDataCache[pairAddress.toLowerCase()] = {
+                token0,
+                token1,
+                reserve0,
+                reserve1,
+                lastUpdateBlock: blockNumber,
+                lastChecked: Date.now() // Add this line
+            };
+            //Asynchronously check for arbitrage.
+            processSwap(pairAddress, reserve0, reserve1, token0, token1, pairContract.address);
+        });
 
-      // --- Listen for Swap Events ---
-      pairContract.on("Swap", async (sender, amount0In, amount1In, amount0Out, amount1Out, to) => {
-        // console.log(`Swap event on pair: ${pairAddress}`); // Reduce logging for production
+        // --- Listen for Swap Events ---
+        pairContract.on("Swap", async (sender, amount0In, amount1In, amount0Out, amount1Out, to) => {
+            // console.log(`Swap event on pair: ${pairAddress}`); // Reduce logging for production
 
-        // We don't need to do anything here anymore!  The *Sync* event
-        // handler will update the reserves, and *that's* where we check for arbitrage.
+            // We don't need to do anything here anymore!  The *Sync* event
+            // handler will update the reserves, and *that's* where we check for arbitrage.
 
         });
 
-      // Initial reserve fetch and cache population
+        // Initial reserve fetch and cache population
         try {
             const reserves = await pairContract.getReserves();
             const blockNumber = await provider.getBlockNumber();
             // Ensure consistent token order
             const initialToken0 = await pairContract.token0();
-            if(token0 != initialToken0.toLowerCase()){
+            if (token0 != initialToken0.toLowerCase()) {
                 [reserve0, reserve1] = [reserve1, reserve0];
             }
-             pairDataCache[pairAddress.toLowerCase()] = {
-                  token0,
-                  token1,
-                  reserve0: reserves[0],
-                  reserve1: reserves[1],
-                  lastUpdateBlock: blockNumber,
-                  lastChecked: Date.now()
-              };
+            pairDataCache[pairAddress.toLowerCase()] = {
+                token0,
+                token1,
+                reserve0: reserves[0],
+                reserve1: reserves[1],
+                lastUpdateBlock: blockNumber,
+                lastChecked: Date.now()
+            };
 
         } catch (error) {
             console.error(`Error fetching initial reserves for pair ${pairAddress}:`, error);
@@ -99,7 +100,7 @@ async function main() {
         const allPairs = Object.keys(pairDataCache);
         const potentialTriangles = findTriangularPairs(token0, token1, allPairs, pairDataCache);
 
-            // --- Check for triangular arbitrage ---
+        // --- Check for triangular arbitrage ---
         for (const triangle of potentialTriangles) {
             await checkTriangularArbitrage(triangle, provider);
         }
@@ -108,29 +109,29 @@ async function main() {
         // --- Get other pair address ---
         let otherRouter;
         let otherFactory;
-        if(currentPool.toLowerCase() == UNISWAP_ROUTER){
-        otherRouter = SUSHI_ROUTER;
-        otherFactory = await getFactory(SUSHI_ROUTER, provider);
+        if (currentPool.toLowerCase() == UNISWAP_ROUTER) {
+            otherRouter = SUSHI_ROUTER;
+            otherFactory = await getFactory(SUSHI_ROUTER, provider);
 
-        }else if (currentPool.toLowerCase() == SUSHI_ROUTER){
+        } else if (currentPool.toLowerCase() == SUSHI_ROUTER) {
             otherRouter = UNISWAP_ROUTER;
             otherFactory = await getFactory(UNISWAP_ROUTER, provider);
 
-        }else{
-        console.error("Unkown pool");
-        return;
+        } else {
+            console.error("Unkown pool");
+            return;
         }
 
         const otherPairAddress = await otherFactory.getPair(token0, token1);
 
-        if(otherPairAddress === ethers.ZeroAddress) {
-        //console.error(`Other pair does not exist for ${token0} and ${token1}`); //Reduce logging
-        return;
+        if (otherPairAddress === ethers.ZeroAddress) {
+            //console.error(`Other pair does not exist for ${token0} and ${token1}`); //Reduce logging
+            return;
         }
         //Check for cached
         const otherPairData = pairDataCache[otherPairAddress.toLowerCase()];
         if (!otherPairData) {
-        // console.warn(`Reserves not found for other pair: ${otherPairAddress}.  Skipping.`); //Reduce logging
+            // console.warn(`Reserves not found for other pair: ${otherPairAddress}.  Skipping.`); //Reduce logging
             return;
         }
 
@@ -154,7 +155,7 @@ async function main() {
             tradeTokenIn = token0;
             tradeTokenOut = token1
         }
-              // Check liquidity threshold before proceeding.
+        // Check liquidity threshold before proceeding.
         if (BigInt(daiWethReserve) < BigInt(process.env.LIQUIDITY_THRESHOLD) || BigInt(otherPairDaiWethReserve) < BigInt(process.env.LIQUIDITY_THRESHOLD)) {
             //console.log(`Liquidity below threshold for pair: ${pairAddress} or ${otherPairAddress}. Skipping.`);
             return;
@@ -167,15 +168,15 @@ async function main() {
             const expectedOutputOther = calculateUniswapV2Output(amountIn, otherReserve, daiWethReserve);
             const inputForExpected = calculateUniswapV2Input(expectedOutputOther, otherPairDaiWethReserve, otherPairOtherReserve);
 
-                let profit = BigInt(amountIn) - inputForExpected;
+            let profit = BigInt(amountIn) - inputForExpected;
 
-                if(profit > 0n) { // Check if we have a theoretical profit
+            if (profit > 0n) { // Check if we have a theoretical profit
 
                 const [owner] = await ethers.getSigners();
                 const bot = await ethers.getContractAt("MegaFlashBot", process.env.BOT_ADDRESS, owner);
                 let estimatedGasCost = 0n;
 
-                try{
+                try {
                     //Estimate the gas.
                     const gasEstimate = await bot.estimateGas.executeFlashLoan(
                         amountIn.toString(),
@@ -187,7 +188,7 @@ async function main() {
                     );
                     estimatedGasCost = gasEstimate.mul(ethers.utils.parseUnits("20", "gwei")); // Estimate with a base gas price
 
-                }catch(error){
+                } catch (error) {
                     //console.log("Gas estimation Error", error) //Reduce logging.
                     continue; // Skip to next
                 }
@@ -215,7 +216,7 @@ async function main() {
 
     async function checkTriangularArbitrage(triangle, provider) {
 
-        if(!triangle || triangle.length != 3) return;
+        if (!triangle || triangle.length != 3) return;
         const [pair1, pair2, pair3] = triangle;
 
         //Get all reserves.
@@ -224,13 +225,13 @@ async function main() {
         const pair3Contract = new ethers.Contract(pair3, require('../abis/IUniswapV2Pair.json'), provider);
 
         let reserves1, reserves2, reserves3;
-        try{
+        try {
             [reserves1, reserves2, reserves3] = await Promise.all([
                 pair1Contract.getReserves(),
                 pair2Contract.getReserves(),
                 pair3Contract.getReserves()
             ]);
-        }catch(error){
+        } catch (error) {
             console.log("Error getting reserves on triangle check")
             return
         }
@@ -242,31 +243,31 @@ async function main() {
 
         // Extract token addresses
         let tokenA, tokenB, tokenC
-        try{
+        try {
             [tokenA, tokenB, tokenC] = await Promise.all([
                 pair1Contract.token0(),
                 pair2Contract.token0(),
                 pair3Contract.token0()
             ]);
-        }catch(error){
+        } catch (error) {
             console.log("Error getting token in triangle check", error);
         }
 
         //Ensure consistent ordering of tokens.
         const pairData1 = pairDataCache[pair1.toLowerCase()];
-        if(tokenA.toLowerCase() != pairData1.token0.toLowerCase()){
+        if (tokenA.toLowerCase() != pairData1.token0.toLowerCase()) {
             let temp = reserves1[0];
             reserves1[0] = reserves1[1];
             reserves1[1] = temp;
         }
         const pairData2 = pairDataCache[pair2.toLowerCase()];
-        if(tokenB.toLowerCase() != pairData2.token0.toLowerCase()){
+        if (tokenB.toLowerCase() != pairData2.token0.toLowerCase()) {
             let temp = reserves2[0];
             reserves2[0] = reserves2[1];
             reserves2[1] = temp;
         }
         const pairData3 = pairDataCache[pair3.toLowerCase()];
-        if(tokenC.toLowerCase() != pairData3.token0.toLowerCase()){
+        if (tokenC.toLowerCase() != pairData3.token0.toLowerCase()) {
             let temp = reserves3[0];
             reserves3[0] = reserves3[1];
             reserves3[1] = temp;
@@ -297,11 +298,11 @@ async function main() {
             if (profit > 0n) {
                 const [owner] = await ethers.getSigners();
                 const bot = await ethers.getContractAt("MegaFlashBot", process.env.BOT_ADDRESS, owner);
-                 let estimatedGasCost = 0n;
+                let estimatedGasCost = 0n;
                 // Estimate gas cost (this is a rough estimate and needs refinement)
                 try {
 
-                     const gasEstimate = await bot.estimateGas.executeFlashLoan(
+                    const gasEstimate = await bot.estimateGas.executeFlashLoan(
                         amountIn.toString(),
                         tokenA, //token0
                         tokenB, //token1
@@ -381,40 +382,40 @@ async function main() {
     //Helper to get a pair address.
     function getPairAddress(tokenA, tokenB, router) {
 
-      const [token0, token1] = tokenA.toLowerCase() < tokenB.toLowerCase() ? [tokenA, tokenB] : [tokenB, tokenA]
-      const salt = ethers.keccak256(ethers.solidityPacked(['address', 'address'], [token0, token1]));
-      let factoryAddress;
+        const [token0, token1] = tokenA.toLowerCase() < tokenB.toLowerCase() ? [tokenA, tokenB] : [tokenB, tokenA]
+        const salt = ethers.utils.keccak256(ethers.utils.solidityPacked(['address', 'address'], [token0, token1]));
+        let factoryAddress;
 
-      if(router == UNISWAP_ROUTER){
-          factoryAddress = "0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f"; //Uniswap
-      }else{
-         factoryAddress = "0xc35DADB65012eC5796536bD9864eD8773aBc74C4"; //Sushi
-      }
+        if (router == UNISWAP_ROUTER) {
+            factoryAddress = "0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f"; //Uniswap
+        } else {
+            factoryAddress = "0xc35DADB65012eC5796536bD9864eD8773aBc74C4"; //Sushi
+        }
 
-      const initCodeHash = "0xe18a34eb0e04b04f7a0ac29a6e80748dca96319b42c54d679cb821dca90c6303" //Same for uniswap and sushiswap;
-      const create2Address = ethers.getCreate2Address(factoryAddress, salt, initCodeHash);
-      return create2Address;
+        const initCodeHash = "0xe18a34eb0e04b04f7a0ac29a6e80748dca96319b42c54d679cb821dca90c6303" //Same for uniswap and sushiswap;
+        const create2Address = ethers.utils.getCreate2Address(factoryAddress, salt, initCodeHash);
+        return create2Address;
     }
 
     async function setupInitialPairs(factory, provider) {
         const allPairsLength = await factory.allPairsLength();
 
         for (let i = 0; i < allPairsLength; i++) {
-            try{
+            try {
                 const pairAddress = await factory.allPairs(i);
                 await addPairListeners(pairAddress, provider);
-            }catch(error){
+            } catch (error) {
                 console.log("Error in allPairsLength loop", error)
             }
         }
     }
 
-    async function reconnectWebSocket(provider){
-        try{
+    async function reconnectWebSocket(provider) {
+        try {
             console.log("Reconnecting....")
-           const newProvider =  new ethers.providers.WebSocketProvider(process.env.RPC_URL);
-           provider = newProvider;
-        }catch(error){
+            const newProvider = new ethers.providers.WebSocketProvider(process.env.RPC_URL);
+            provider = newProvider;
+        } catch (error) {
             console.log("Error during reconnect", error);
         }
     }
@@ -425,7 +426,7 @@ async function main() {
     const MAX_RECONNECT_ATTEMPTS = 5;
     const INITIAL_RECONNECT_DELAY = 1000; // 1 second
 
-     function connect() {
+    function connect() {
         ws = new WebSocket(process.env.RPC_URL);
 
         ws.on('open', async () => {
@@ -442,9 +443,9 @@ async function main() {
             console.log("Subscribed to pending transactions.");
 
             const uniswapFactory = new ethers.Contract(await getFactory(UNISWAP_ROUTER, provider), require('../abis/IUniswapV2Factory.json'), provider);
-              const sushiFactory = new ethers.Contract(await getFactory(SUSHI_ROUTER, provider), require('../abis/IUniswapV2Factory.json'), provider);
+            const sushiFactory = new ethers.Contract(await getFactory(SUSHI_ROUTER, provider), require('../abis/IUniswapV2Factory.json'), provider);
 
-              // Listen for PairCreated (for new pairs)
+            // Listen for PairCreated (for new pairs)
             uniswapFactory.on("PairCreated", (token0, token1, pairAddress) => {
                 console.log(`New Uniswap Pair Created: ${token0} / ${token1} at ${pairAddress}`);
                 addPairListeners(pairAddress, provider);
@@ -460,39 +461,39 @@ async function main() {
 
             // Periodic Cache Refresh (Fallback)  Moved inside to be apart of the connect.
             setInterval(async () => {
-              for (const pairAddress in pairDataCache) {
-                if (pairDataCache.hasOwnProperty(pairAddress)) {
-                  const pairData = pairDataCache[pairAddress];
+                for (const pairAddress in pairDataCache) {
+                    if (pairDataCache.hasOwnProperty(pairAddress)) {
+                        const pairData = pairDataCache[pairAddress];
 
-                  // Check if 60 seconds have passed since the last check
-                    if (Date.now() - pairData.lastChecked >= 60000) { // 60 seconds
-                        try {
-                            const pairContract = new ethers.Contract(pairAddress, require('../abis/IUniswapV2Pair.json'), provider);
-                            const reserves = await pairContract.getReserves();
-                            const blockNumber = await provider.getBlockNumber();
-                            const token0 = await pairContract.token0();
-                            let reserve0 = reserves[0];
-                            let reserve1 = reserves[1];
-                             // Ensure consistent token order
-                            if(pairData.token0.toLowerCase() != token0.toLowerCase()){
-                                [reserve0, reserve1] = [reserve1, reserve0];
+                        // Check if 60 seconds have passed since the last check
+                        if (Date.now() - pairData.lastChecked >= 60000) { // 60 seconds
+                            try {
+                                const pairContract = new ethers.Contract(pairAddress, require('../abis/IUniswapV2Pair.json'), provider);
+                                const reserves = await pairContract.getReserves();
+                                const blockNumber = await provider.getBlockNumber();
+                                const token0 = await pairContract.token0();
+                                let reserve0 = reserves[0];
+                                let reserve1 = reserves[1];
+                                // Ensure consistent token order
+                                if (pairData.token0.toLowerCase() != token0.toLowerCase()) {
+                                    [reserve0, reserve1] = [reserve1, reserve0];
+                                }
+                                pairDataCache[pairAddress.toLowerCase()] = {
+                                    token0: pairData.token0,
+                                    token1: pairData.token1,
+                                    reserve0,
+                                    reserve1,
+                                    lastUpdateBlock: blockNumber,
+                                    lastChecked: Date.now()  // Update the lastChecked timestamp
+                                };
+
+                                //console.log(`Refreshed reserves for pair: ${pairAddress}`); // Reduce logging.
+                            } catch (error) {
+                                console.error(`Error refreshing reserves for pair ${pairAddress}:`, error);
                             }
-                             pairDataCache[pairAddress.toLowerCase()] = {
-                                  token0: pairData.token0,
-                                  token1: pairData.token1,
-                                  reserve0,
-                                  reserve1,
-                                  lastUpdateBlock: blockNumber,
-                                  lastChecked: Date.now()  // Update the lastChecked timestamp
-                              };
-
-                            //console.log(`Refreshed reserves for pair: ${pairAddress}`); // Reduce logging.
-                        } catch (error) {
-                            console.error(`Error refreshing reserves for pair ${pairAddress}:`, error);
                         }
                     }
                 }
-              }
             }, 60000); // Check every 60 seconds
 
         });
@@ -520,6 +521,83 @@ async function main() {
         }
     }
     connect();
+}
+//Helper function to call the executeArbitrage function
+async function executeArbitrage(provider, bot, tradeDetails, owner, arbType = 0) {
+    console.log("Executing Arbitrage...");
+    const { FLASHBOTS_AUTH_KEY, SLIPPAGE_TOLERANCE } = process.env;
+    const authSigner = new ethers.Wallet(FLASHBOTS_AUTH_KEY, provider);
+    if (!FLASHBOTS_AUTH_KEY) {
+        console.log("No Flashbots auth key. Skipping submission.");
+        return;
+    }
+    const flashbotsProvider = await FlashbotsBundleProvider.create(provider, authSigner, "https://relay.flashbots.net");
+
+    const routerABI = require('../abis/IUniswapV2Router02.json');
+    const router = new ethers.Contract(tradeDetails.router, routerABI, owner);
+
+    const flashloanAmount = tradeDetails.amountIn;
+    const token0 = tradeDetails.path[0];
+    const token1 = tradeDetails.path[1];
+    const token2 = tradeDetails.path.length > 2 ? tradeDetails.path[2] : ethers.constants.AddressZero;
+
+    const flashLoanTx = await bot.populateTransaction.executeFlashLoan(
+        flashloanAmount,
+        token0,
+        token1,
+        token2,
+        arbType,
+        SLIPPAGE_TOLERANCE
+    );
+
+    let blockNumber = await provider.getBlockNumber();
+    let targetBlockNumber = blockNumber + 1;
+    const bundle = [{ signer: owner, transaction: flashLoanTx }];
+
+    let signedBundle;
+    try {
+        signedBundle = await flashbotsProvider.signBundle(bundle);
+    } catch (error){
+        console.log("Error signing bundle", error);
+    }
+
+    let simulation;
+    try {
+        simulation = await flashbotsProvider.simulate(signedBundle, targetBlockNumber);
+        if ("error" in simulation) {
+            console.warn(`Bundle Simulation Error: ${simulation.error.message}`);
+            return;
+        }
+        console.log(`Simulation Success! Estimated gas: ${simulation.totalGasUsed}`);
+    } catch (error) {
+        console.error("Simulation error:", error);
+        return; // Exit if simulation fails
+    }
+    console.log(`Submitting bundle for block: ${targetBlockNumber}`);
+    try {
+        const submission = await flashbotsProvider.sendRawBundle(signedBundle, targetBlockNumber);
+        console.log('Bundle submitted to Flashbots! Bundle Hash:', submission.bundleHash);
+
+    } catch (error) {
+        console.log("Error submitting to flashbots", error);
+    }
+
+    //Multi stage Bidding
+    const MAX_BLOCKS = 5;  // Maximum number of blocks to try
+     for (let i = 1; i < MAX_BLOCKS; i++) {
+        const newTargetBlock = blockNumber + 1 + i;
+        console.log(`Submitting bundle, attempt ${i+1}, target block ${newTargetBlock}`);
+        try {
+              const resubmission = await flashbotsProvider.sendRawBundle(
+                signedBundle,
+                newTargetBlock
+            );
+            console.log("Bundle resubmitted! Bundle Hash:", resubmission.bundleHash);
+
+        } catch (error) {
+            console.log("Error submitting to flashbots", error);
+        }
+    }
 }
 
 main().catch(console.error);
