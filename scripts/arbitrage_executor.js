@@ -13,27 +13,72 @@ async function executeArbitrage(provider, bot, tradeDetails, owner, arbType = 0)
     }
     const flashbotsProvider = await FlashbotsBundleProvider.create(provider, authSigner, "https://relay.flashbots.net");
 
-    let maxFeePerGas, maxPriorityFeePerGas;
+    const routerABI = require('../abis/IUniswapV2Router02.json');
+    const router = new ethers.Contract(tradeDetails.router, routerABI, owner);
+
+    const flashloanAmount = tradeDetails.amountIn;
+    const token0 = tradeDetails.path[0];
+    const token1 = tradeDetails.path[1];
+    const token2 = tradeDetails.path.length > 2 ? tradeDetails.path[2] : ethers.constants.AddressZero;
+
+    const flashLoanTx = await bot.populateTransaction.executeFlashLoan(
+        flashloanAmount,
+        token0,
+        token1,
+        token2,
+        arbType,
+        SLIPPAGE_TOLERANCE
+    );
+
+    let blockNumber = await provider.getBlockNumber();
+    let targetBlockNumber = blockNumber + 1;
+    const bundle = [{ signer: owner, transaction: flashLoanTx }];
+
+    let signedBundle;
     try {
-        const gasPriceResponse = await axios.get(process.env.GAS_ORACLE_URL, {
-            headers: { 'Authorization': `Bearer ${process.env.BLOCKNATIVE_API_KEY}` }
-        });
-        maxFeePerGas = ethers.utils.parseUnits(gasPriceResponse.data.fast.maxFeePerGas, 'gwei');
-        maxPriorityFeePerGas = ethers.utils.parseUnits(gasPriceResponse.data.fast.maxPriorityFeePerGas, 'gwei');
-    } catch (error) {
-        console.warn("Blocknative gas oracle failed. Falling back to Etherscan...");
-        try {
-            const etherscanResponse = await axios.get(`https://api.etherscan.io/api?module=gastracker&action=gasoracle&apikey=${process.env.ETHERSCAN_API_KEY}`);
-            maxFeePerGas = ethers.utils.parseUnits(etherscanResponse.data.result.FastGasPrice, 'gwei');
-            maxPriorityFeePerGas = ethers.utils.parseUnits("2", "gwei");
-        } catch (fallbackError) {
-            console.error("Fallback gas oracle failed. Using default values.");
-            maxFeePerGas = ethers.utils.parseUnits("100", "gwei");
-            maxPriorityFeePerGas = ethers.utils.parseUnits("2", "gwei");
-        }
+        signedBundle = await flashbotsProvider.signBundle(bundle);
+    } catch (error){
+        console.log("Error signing bundle", error);
     }
 
-    // Rest of the function remains unchanged...
+    let simulation;
+    try {
+        simulation = await flashbotsProvider.simulate(signedBundle, targetBlockNumber);
+        if ("error" in simulation) {
+            console.warn(`Bundle Simulation Error: ${simulation.error.message}`);
+            return;
+        }
+        console.log(`Simulation Success! Estimated gas: ${simulation.totalGasUsed}`);
+        } catch (error) {
+        console.error("Simulation error:", error);
+        return; // Exit if simulation fails
+    }
+    console.log(`Submitting bundle for block: ${targetBlockNumber}`);
+    try {
+        const submission = await flashbotsProvider.sendRawBundle(signedBundle, targetBlockNumber);
+        console.log('Bundle submitted to Flashbots! Bundle Hash:', submission.bundleHash);
+
+    } catch (error) {
+        console.log("Error submitting to flashbots", error);
+    }
+
+    //Multi stage Bidding
+    const MAX_BLOCKS = 5;  // Maximum number of blocks to try
+     for (let i = 1; i < MAX_BLOCKS; i++) {
+        const newTargetBlock = blockNumber + 1 + i;
+        console.log(`Submitting bundle, attempt ${i+1}, target block ${newTargetBlock}`);
+        try {
+              const resubmission = await flashbotsProvider.sendRawBundle(
+                signedBundle,
+                newTargetBlock
+            );
+            console.log("Bundle resubmitted! Bundle Hash:", resubmission.bundleHash);
+
+        } catch (error) {
+            console.log("Error submitting to flashbots", error);
+        }
+
+    }
 }
 
 module.exports = { executeArbitrage };
