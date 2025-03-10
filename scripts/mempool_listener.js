@@ -230,4 +230,296 @@ async function main() {
                 pair2Contract.getReserves(),
                 pair3Contract.getReserves()
             ]);
-        }catch(error
+        }catch(error){
+            console.log("Error getting reserves on triangle check")
+            return
+        }
+
+        // Check if any reserve is null or zero.
+        if (!reserves1 || !reserves2 || !reserves3) {
+            return;
+        }
+
+        // Extract token addresses
+        let tokenA, tokenB, tokenC
+        try{
+            [tokenA, tokenB, tokenC] = await Promise.all([
+                pair1Contract.token0(),
+                pair2Contract.token0(),
+                pair3Contract.token0()
+            ]);
+        }catch(error){
+            console.log("Error getting token in triangle check", error);
+        }
+
+        //Ensure consistent ordering of tokens.
+        const pairData1 = pairDataCache[pair1.toLowerCase()];
+        if(tokenA.toLowerCase() != pairData1.token0.toLowerCase()){
+            let temp = reserves1[0];
+            reserves1[0] = reserves1[1];
+            reserves1[1] = temp;
+        }
+        const pairData2 = pairDataCache[pair2.toLowerCase()];
+        if(tokenB.toLowerCase() != pairData2.token0.toLowerCase()){
+            let temp = reserves2[0];
+            reserves2[0] = reserves2[1];
+            reserves2[1] = temp;
+        }
+        const pairData3 = pairDataCache[pair3.toLowerCase()];
+        if(tokenC.toLowerCase() != pairData3.token0.toLowerCase()){
+            let temp = reserves3[0];
+            reserves3[0] = reserves3[1];
+            reserves3[1] = temp;
+        }
+
+
+        const reserveInA = reserves1[0];
+        const reserveOutA = reserves1[1];
+
+        const reserveInB = reserves2[0];
+        const reserveOutB = reserves2[1];
+
+        const reserveInC = reserves3[0];
+        const reserveOutC = reserves3[1];
+
+        // Now we have a potential triangle: tokenA -> tokenB -> tokenC -> tokenA.
+        // Iterate over different amounts to find optimal trade.
+
+        for (let percentage = 10; percentage <= 50; percentage += 10) {
+            const amountIn = (BigInt(reserveInA) * BigInt(percentage)) / 100n;
+
+            let amountOutB = calculateUniswapV2Output(amountIn, reserveInA, reserveOutA);
+            let amountOutC = calculateUniswapV2Output(amountOutB, reserveInB, reserveOutB);
+            let finalAmountA = calculateUniswapV2Output(amountOutC, reserveInC, reserveOutC);
+
+            let profit = finalAmountA - amountIn;
+
+            if (profit > 0n) {
+                const [owner] = await ethers.getSigners();
+                const bot = await ethers.getContractAt("MegaFlashBot", process.env.BOT_ADDRESS, owner);
+                 let estimatedGasCost = 0n;
+                // Estimate gas cost (this is a rough estimate and needs refinement)
+                try {
+
+                     const gasEstimate = await bot.estimateGas.executeFlashLoan(
+                        amountIn.toString(),
+                        tokenA, //token0
+                        tokenB, //token1
+                        tokenC, //token2,
+                        1, //ArbitrageType is 1 for THREE_TOKEN
+                        process.env.SLIPPAGE_TOLERANCE //Slippage
+                    );
+
+                    estimatedGasCost = gasEstimate.mul(ethers.utils.parseUnits("20", "gwei")); // Estimate with a base gas price
+
+                } catch (error) {
+                    // console.error("Gas estimation error:", error); //Reduce logging
+                    continue; // Skip to next percentage if gas estimation fails
+                }
+
+                // Check if profit exceeds estimated gas cost
+                if (profit > estimatedGasCost) {
+                    const tradeDetails = {
+                        router: UNISWAP_ROUTER,  // Assuming Uniswap for triangular
+                        amountIn: amountIn.toString(),
+                        path: [tokenA, tokenB, tokenC],
+                        expectedProfit: profit.toString(),
+                        arbType: 1, // Triangular
+                    };
+
+                    // console.log("TRIANGULAR OPPORTUNITY:", tradeDetails); // Keep this log
+
+                    // Execute triangular arbitrage (asynchronously)
+                    executeArbitrage(provider, bot, tradeDetails, owner, 1).catch(console.error); // 1 for Triangle
+                }
+            }
+        }
+    }
+
+
+    function findTriangularPairs(token0, token1, allPairs, pairDataCache) {
+        const potentialTriangles = [];
+
+        // Find pairs that share one token with the original pair
+        for (const pair of allPairs) {
+            const pairData = pairDataCache[pair.toLowerCase()];
+            if (!pairData) continue; // Skip if no data
+
+            const { token0: p0, token1: p1 } = pairData;
+
+            // Check if this pair shares exactly one token with the original pair
+            const sharesToken0 = (p0.toLowerCase() === token0.toLowerCase() || p1.toLowerCase() === token0.toLowerCase());
+            const sharesToken1 = (p0.toLowerCase() === token1.toLowerCase() || p1.toLowerCase() === token1.toLowerCase());
+
+            if ((sharesToken0 && !sharesToken1) || (!sharesToken0 && sharesToken1)) {
+                // Find a third pair that completes the triangle
+                const sharedToken = sharesToken0 ? token0 : token1;
+                const otherToken = sharesToken0 ? token1 : token0;
+                const thirdTokenCandidate = (p0.toLowerCase() === sharedToken.toLowerCase()) ? p1 : p0;
+
+                for (const pair2 of allPairs) {
+                    if (pair2.toLowerCase() === pair.toLowerCase()) continue; // Skip the second pair itself
+                    const pairData2 = pairDataCache[pair2.toLowerCase()];
+                    if (!pairData2) continue;
+
+                    const { token0: p2t0, token1: p2t1 } = pairData2;
+
+                    // Check if the third pair connects the otherToken and thirdTokenCandidate
+                    const connectsOther = (p2t0.toLowerCase() === otherToken.toLowerCase() || p2t1.toLowerCase() === otherToken.toLowerCase());
+                    const connectsThird = (p2t0.toLowerCase() === thirdTokenCandidate.toLowerCase() || p2t1.toLowerCase() === thirdTokenCandidate.toLowerCase());
+
+                    if (connectsOther && connectsThird) {
+                        // We have a potential triangle!  Add it to the list.
+                        potentialTriangles.push([pair.toLowerCase(), pair2.toLowerCase(), getPairAddress(sharedToken, thirdTokenCandidate, (sharedToken.toLowerCase() == token0.toLowerCase() || sharedToken.toLowerCase() == token1.toLowerCase()) ? UNISWAP_ROUTER : SUSHI_ROUTER)]);
+                    }
+                }
+            }
+        }
+        return potentialTriangles;
+    }
+
+    //Helper to get a pair address.
+    function getPairAddress(tokenA, tokenB, router) {
+
+      const [token0, token1] = tokenA.toLowerCase() < tokenB.toLowerCase() ? [tokenA, tokenB] : [tokenB, tokenA]
+      const salt = ethers.keccak256(ethers.solidityPacked(['address', 'address'], [token0, token1]));
+      let factoryAddress;
+
+      if(router == UNISWAP_ROUTER){
+          factoryAddress = "0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f"; //Uniswap
+      }else{
+         factoryAddress = "0xc35DADB65012eC5796536bD9864eD8773aBc74C4"; //Sushi
+      }
+
+      const initCodeHash = "0xe18a34eb0e04b04f7a0ac29a6e80748dca96319b42c54d679cb821dca90c6303" //Same for uniswap and sushiswap;
+      const create2Address = ethers.getCreate2Address(factoryAddress, salt, initCodeHash);
+      return create2Address;
+    }
+
+    async function setupInitialPairs(factory, provider) {
+        const allPairsLength = await factory.allPairsLength();
+
+        for (let i = 0; i < allPairsLength; i++) {
+            try{
+                const pairAddress = await factory.allPairs(i);
+                await addPairListeners(pairAddress, provider);
+            }catch(error){
+                console.log("Error in allPairsLength loop", error)
+            }
+        }
+    }
+
+    async function reconnectWebSocket(provider){
+        try{
+            console.log("Reconnecting....")
+           const newProvider =  new ethers.providers.WebSocketProvider(process.env.RPC_URL);
+           provider = newProvider;
+        }catch(error){
+            console.log("Error during reconnect", error);
+        }
+    }
+
+    // --- WebSocket Setup and Connection Logic ---
+    let ws;
+    let reconnectAttempts = 0;
+    const MAX_RECONNECT_ATTEMPTS = 5;
+    const INITIAL_RECONNECT_DELAY = 1000; // 1 second
+
+     function connect() {
+        ws = new WebSocket(process.env.RPC_URL);
+
+        ws.on('open', async () => {
+            console.log("WebSocket connected.");
+            reconnectAttempts = 0; // Reset on successful connection
+
+            //Subscribe
+            ws.send(JSON.stringify({
+                jsonrpc: "2.0",
+                id: 1,
+                method: "eth_subscribe",
+                params: ["newPendingTransactions"]
+            }));
+            console.log("Subscribed to pending transactions.");
+
+            const uniswapFactory = new ethers.Contract(await getFactory(UNISWAP_ROUTER, provider), require('../abis/IUniswapV2Factory.json'), provider);
+              const sushiFactory = new ethers.Contract(await getFactory(SUSHI_ROUTER, provider), require('../abis/IUniswapV2Factory.json'), provider);
+
+              // Listen for PairCreated (for new pairs)
+            uniswapFactory.on("PairCreated", (token0, token1, pairAddress) => {
+                console.log(`New Uniswap Pair Created: ${token0} / ${token1} at ${pairAddress}`);
+                addPairListeners(pairAddress, provider);
+            });
+            sushiFactory.on("PairCreated", (token0, token1, pairAddress) => {
+                console.log(`New Sushiswap Pair Created: ${token0} / ${token1} at ${pairAddress}`);
+                addPairListeners(pairAddress, provider);
+            });
+
+            await setupInitialPairs(uniswapFactory, provider);
+            await setupInitialPairs(sushiFactory, provider);
+
+
+            // Periodic Cache Refresh (Fallback)  Moved inside to be apart of the connect.
+            setInterval(async () => {
+              for (const pairAddress in pairDataCache) {
+                if (pairDataCache.hasOwnProperty(pairAddress)) {
+                  const pairData = pairDataCache[pairAddress];
+
+                  // Check if 60 seconds have passed since the last check
+                    if (Date.now() - pairData.lastChecked >= 60000) { // 60 seconds
+                        try {
+                            const pairContract = new ethers.Contract(pairAddress, require('../abis/IUniswapV2Pair.json'), provider);
+                            const reserves = await pairContract.getReserves();
+                            const blockNumber = await provider.getBlockNumber();
+                            const token0 = await pairContract.token0();
+                            let reserve0 = reserves[0];
+                            let reserve1 = reserves[1];
+                             // Ensure consistent token order
+                            if(pairData.token0.toLowerCase() != token0.toLowerCase()){
+                                [reserve0, reserve1] = [reserve1, reserve0];
+                            }
+                             pairDataCache[pairAddress.toLowerCase()] = {
+                                  token0: pairData.token0,
+                                  token1: pairData.token1,
+                                  reserve0,
+                                  reserve1,
+                                  lastUpdateBlock: blockNumber,
+                                  lastChecked: Date.now()  // Update the lastChecked timestamp
+                              };
+
+                            //console.log(`Refreshed reserves for pair: ${pairAddress}`); // Reduce logging.
+                        } catch (error) {
+                            console.error(`Error refreshing reserves for pair ${pairAddress}:`, error);
+                        }
+                    }
+                }
+              }
+            }, 60000); // Check every 60 seconds
+
+        });
+
+        ws.on('close', () => {
+            console.log("WebSocket connection closed.");
+            attemptReconnect();
+        });
+
+        ws.on('error', (error) => {
+            console.error("WebSocket error:", error);
+            // No need to explicitly close; 'close' event will trigger.
+        });
+    }
+
+    function attemptReconnect() {
+        if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+            const delay = INITIAL_RECONNECT_DELAY * Math.pow(2, reconnectAttempts);
+            console.log(`Attempting to reconnect (attempt ${reconnectAttempts + 1}) in ${delay / 1000} seconds...`);
+            reconnectAttempts++;
+            setTimeout(connect, delay);
+        } else {
+            console.error("Max reconnect attempts reached.  Exiting.");
+            process.exit(1); // Exit (consider a more graceful shutdown).
+        }
+    }
+    connect();
+}
+
+main().catch(console.error);
