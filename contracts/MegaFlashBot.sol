@@ -1,15 +1,17 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.19;
 
+import "forge-std/console.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
-import "@openzeppelin/contracts/access/Ownable.sol";
-import "./interfaces/IFlashLoanSimpleReceiver.sol";
-import "./interfaces/IUniswapV2Router02.sol";
 import "./interfaces/IAavePool.sol";
-import "./interfaces/IUniswapV2Factory.sol"; // Add for factory
-import "./interfaces/IUniswapV2Pair.sol";   // Add for pair
+import "./interfaces/IUniswapV2Router02.sol";
+import "./interfaces/IUniswapV2Pair.sol";
+import "./modules/BridgeModule.sol";
+import "./modules/MEVModule.sol";
+import "./modules/HedgingModule.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
 // Chainlink AggregatorV3Interface
 interface AggregatorV3Interface {
@@ -25,340 +27,344 @@ interface AggregatorV3Interface {
     );
 }
 
-error InsufficientProfit(uint256 expected, uint256 actual);
-error FlashLoanFailed(string reason);
-error InsufficientBalance(uint256 required, uint256 available);
-error InvalidPath();
-error MaxSlippageExceeded();
-error CircuitBreakerActive();
-error EmergencyStopActive();
-error InvalidArbitrageType();
-error NoProfit();
-error LowLiquidity(uint256 available, uint256 minRequired); // Added
-
-
-contract MegaFlashBot is IFlashLoanSimpleReceiver, Ownable, ReentrancyGuard {
+contract MegaFlashBot is IFlashLoanSimpleReceiver, ReentrancyGuard, Ownable {
     using SafeERC20 for IERC20;
 
-    address public immutable lendingPool;
-    address public immutable uniswapV2Router;
-    address public immutable dai;
+    // --- State Variables (Optimized for Gas) ---
 
-    uint256 public profitThreshold;
-    uint256 public maxDailyLoss;
-    uint256 public initialBalance;
-    bool public circuitBreaker = true;
-    bool public emergency = false;
-    uint256 public maxSlippage = 50;      // Basis points (50 = 0.5%)
-    uint256 public slippageTolerance = 100; // Basis points
-
-    // Market regime: 0 = normal, 1 = high volatility, etc.
-    uint256 public marketRegime;
-
-    // NEW: Chainlink price feed
-    AggregatorV3Interface internal priceFeed;
-    mapping(address => bool) public blacklistedPairs; // Add blacklisting
+    // Use smaller uint types where appropriate
+    uint256 public immutable override flashLoanPremium; // Keep this for now
+    uint256 public slippageTolerance;     // Maximum slippage (basis points)
+    address public lendingPool;             // Aave Lending Pool
+    address public uniswapRouter;       // Uniswap V2 Router
+		address public dai;
+	address public chainlinkOracle;
+	// Use a mapping for blacklisted pairs (efficient lookups)
+    mapping(address => mapping(address => bool)) public blacklistedPairs;
+    bool public circuitBreaker; // Emergency stop
+    bool public emergency;
+    uint256 public profitThreshold; // Minimum profit threshold
 
     // --- Events ---
-    event EmergencyStopTriggered();
-    event EmergencyStopReleased();
-    event TradeExecuted(uint256 tradeAmount, uint256 profit);
-    event FlashLoanExecuted(address asset, uint256 amount);
-    event RepaymentExecuted(address asset, uint256 amount);
-    event RegimeUpdated(uint256 newRegime);
-    event HedgingExecuted(uint256 hedgeAmount, uint256 profit); // Placeholder
-    event ProfitThresholdUpdated(uint256 newThreshold);
-    event MaxSlippageUpdated(uint256 maxSlippage);
-    event SlippageToleranceUpdated(uint256 slippageTolerance);
+    event FlashLoanExecuted(address token, uint256 amount);
+    event TradeExecuted(uint256 amount, uint256 profit);
+    event RepaymentExecuted(address token, uint256 amount);
+	event BlacklistedPairStatus(address token0, address token1, bool blacklisted);
     event CircuitBreakerStatus(bool status);
-    event PairBlacklisted(address pairAddress, bool isBlacklisted); // Add event
+    event EmergencyStatus(bool status);
+    event SetPreliminaryProfitThreshold(uint256 indexed _preliminaryProfitThreshold); //make events to show changes.
+    event SetSlippage(uint256 indexed _slippage);
+    event ProfitThreshold(uint256 indexed _profitThreshold);
+    // --- Enums ---
+    enum ArbitrageType { TWO_TOKEN, THREE_TOKEN }
 
+    // --- Custom Errors ---
+
+    error InvalidArbitrageType();
+    error InsufficientBalance(uint256 required, uint256 current);
+    error InsufficientProfit(uint256 required, uint256 current);
+	error NoProfit();
+    error MaxSlippageExceeded();
+
+     // --- Modules ---
+    BridgeModule public bridgeModule;
+    MEVModule public mevModule;
+    HedgingModule public hedgingModule;
+
+    // --- Constructor ---
+
+    constructor(
+        address _lendingPool,
+        address _uniswapRouter,
+				address _dai,
+        uint256 _flashLoanPremium,
+        uint256 _slippageTolerance,
+		address _chainlinkOracle,
+        address _owner
+    ) {
+        lendingPool = _lendingPool;
+        uniswapRouter = _uniswapRouter;
+				dai = _dai;
+        flashLoanPremium = _flashLoanPremium;
+        slippageTolerance = _slippageTolerance;
+				chainlinkOracle = _chainlinkOracle;
+		if(_owner != address(0)){ //to test with no deployer.
+		    _transferOwnership(_owner);
+		}
+    }
+		function setProfitThreshold(uint256 _profitThreshold) external onlyOwner {
+        profitThreshold = _profitThreshold;
+        emit ProfitThreshold(_profitThreshold);
+    }
+
+    function setSlippage(uint256 _slippage) external onlyOwner {
+        require(_slippage <= 10000, "Max slippage is 100%"); // 10000 basis points = 100%
+        slippageTolerance = _slippage;
+        emit SetSlippage(_slippage);
+
+    }
+    function setCircuitBreaker(bool _status) external onlyOwner {
+        circuitBreaker = _status;
+         emit CircuitBreakerStatus(_status);
+    }
+
+    function setEmergency(bool _status) external onlyOwner {
+        emergency = _status;
+         emit EmergencyStatus(_status);
+    }
+    function setBridgeModule(address _bridgeModule) external onlyOwner {
+      bridgeModule = BridgeModule(_bridgeModule);
+    }
+
+    function setMEVModule(address _mevModule) external onlyOwner {
+        mevModule = MEVModule(_mevModule);
+    }
+
+    function setHedgingModule(address _hedgingModule) external onlyOwner {
+        hedgingModule = HedgingModule(_hedgingModule);
+    }
+     function blacklistPair(address _pairAddress, bool _isBlacklisted) external onlyOwner {
+        // Extract token0 and token1 from the pair contract
+        (address token0, address token1) = _getTokensFromPair(_pairAddress);
+        blacklistedPairs[token0][token1] = _isBlacklisted;
+        blacklistedPairs[token1][token0] = _isBlacklisted; // Ensure both directions are blacklisted
+
+        emit BlacklistedPairStatus(token0, token1, _isBlacklisted);
+    }
+		//Internal function to handle getting tokens.
+		 function _getTokensFromPair(address _pairAddress) internal view returns (address token0, address token1) {
+        try IUniswapV2Pair(_pairAddress).token0() returns (address _token0) {
+            token0 = _token0;
+        } catch {
+            revert("Invalid pair address or not a Uniswap V2 pair");
+        }
+
+        try IUniswapV2Pair(_pairAddress).token1() returns (address _token1) {
+            token1 = _token1;
+        } catch {
+            revert("Invalid pair address or not a Uniswap V2 pair");
+        }
+    }
+	    // Add a view function to check if a pair is blacklisted
+    function isPairBlacklisted(address _token0, address _token1) public view returns (bool) {
+        return blacklistedPairs[_token0][_token1] || blacklistedPairs[_token1][_token0];
+    }
+
+    // --- Modifiers ---
     modifier checkCircuitBreaker() {
-         if(!circuitBreaker) revert CircuitBreakerActive(); // Use custom errors.
+        require(!circuitBreaker, "Circuit breaker is active");
         _;
     }
 
     modifier notEmergency() {
-       if(emergency) revert EmergencyStopActive();
+        require(!emergency, "Emergency is active");
         _;
     }
 
- constructor(
-        address _lendingPool,
-        address _uniswapV2Router,
-        address _dai,
-        uint256 _profitThreshold,
-        uint256 _slippageTolerance,
-        address _chainlinkFeed  // NEW: Chainlink feed address
-    ) {
-        lendingPool = _lendingPool;
-        uniswapV2Router = _uniswapV2Router;
-        dai = _dai;
-        profitThreshold = _profitThreshold;
-        slippageTolerance = _slippageTolerance;
-        maxDailyLoss = 1000 ether; // Example: Can lose 1000 DAI
-        initialBalance = 0;
-        marketRegime = 0; // Default regime.
-        priceFeed = AggregatorV3Interface(_chainlinkFeed); // Initialize Chainlink feed
-    }
-
-    // --- Control Functions ---
-      function setProfitThreshold(uint256 newThreshold) external onlyOwner {
-        profitThreshold = newThreshold;
-        emit ProfitThresholdUpdated(newThreshold);
-    }
-     function setPreliminaryProfitThreshold(uint256 _preliminaryProfitThreshold) external onlyOwner {
-        preliminaryProfitThreshold = _preliminaryProfitThreshold;
-    }
-
-        function setMaxSlippage(uint256 _maxSlippage) external onlyOwner {
-        maxSlippage = _maxSlippage;
-        emit MaxSlippageUpdated(_maxSlippage);
-    }
-
-    function setSlippageTolerance(uint256 newSlippageTolerance) external onlyOwner {
-        if(newSlippageTolerance > 10000) revert MaxSlippageExceeded();
-        slippageTolerance = newSlippageTolerance;
-        emit SlippageToleranceUpdated(newSlippageTolerance);
-    }
-
-    function setInitialBalance(uint256 bal) external onlyOwner {
-        initialBalance = bal;
-    }
-
-    function setMaxDailyLoss(uint256 loss) external onlyOwner {
-        maxDailyLoss = loss;
-    }
-    // NEW: Update market regime (e.g., normal, volatile, etc.)
-    function setMarketRegime(uint256 newRegime) external onlyOwner {
-        marketRegime = newRegime;
-        emit RegimeUpdated(newRegime);
-    }
-    // NEW: Execute a hedging trade to mitigate risk.
-    function executeHedgeTrade(uint256 hedgeAmount) external onlyOwner notEmergency {
-        // Placeholder: implement dynamic hedging logic.
-        // For example, buy a correlated asset or use options.
-        revert("Not Implemented");
-    }
-
-    function toggleCircuitBreaker() external onlyOwner {
-        circuitBreaker = !circuitBreaker;
-        emit CircuitBreakerStatus(circuitBreaker);
-    }
-
-    function triggerEmergencyStop() external onlyOwner {
-        emergency = true;
-        emit EmergencyStopTriggered();
-    }
-
-    function resumeOperation() external onlyOwner {
-        emergency = false;
-        emit EmergencyStopReleased();
-    }
-
-    // NEW: Blacklist a pair (to prevent trading on it)
-    function blacklistPair(address _pair, bool _isBlacklisted) external onlyOwner {
-        blacklistedPairs[_pair] = _isBlacklisted;
-        emit PairBlacklisted(_pair, _isBlacklisted);
-    }
-
-    enum ArbitrageType { TWO_TOKEN, THREE_TOKEN }
-
-    function executeFlashLoan(
-        uint256 amount,
-        address token0,
-        address token1,
-        address token2,
-        ArbitrageType arbType,
-        uint256 _slippageTolerance
-
-    ) external onlyOwner nonReentrant checkCircuitBreaker notEmergency returns(bool) {
-
-       // Calculate the expected final amount after trades based on type
-        uint256 finalAmount = amount; // Start with the flash loan amount
+	 // --- Core Functions ---
+		//Use calldata for all external function parameters that are read-only
+  function executeFlashLoan(
+    uint256 amount,
+    address token0,
+    address token1,
+    address token2, // Only used for THREE_TOKEN
+    ArbitrageType arbType,
+    uint256 _slippageTolerance
+  )
+    external
+    onlyOwner
+    nonReentrant
+    checkCircuitBreaker
+    notEmergency
+    returns (bool)
+  {
+        require(!isPairBlacklisted(token0, token1), "Blacklisted pair"); //check if its blacklisted
         if (arbType == ArbitrageType.THREE_TOKEN) {
-            address[] memory path1 = new address[](2);
-            path1[0] = token0;
-            path1[1] = token1;
+           require(!isPairBlacklisted(token1, token2) && !isPairBlacklisted(token2, token0), "Blacklisted pair"); //check if its blacklisted
+         }
+        // NO PROFIT CHECK HERE.  This is done off-chain.
 
-            address[] memory path2 = new address[](2);
-            path2[0] = token1;
-            path2[1] = token2;
-
-            address[] memory path3 = new address[](2);
-            path3[0] = tokenC;
-            path3[1] = tokenA;
-
-            // Calculate expected outputs for triangular arbitrage.
-            uint256[] memory amounts1 = IUniswapV2Router02(uniswapV2Router).getAmountsOut(amount, path1);
-            uint256[] memory amounts2 = IUniswapV2Router02(uniswapV2Router).getAmountsOut(amounts1[1], path2);
-            uint256[] memory amounts3 = IUniswapV2Router02(uniswapV2Router).getAmountsOut(amounts2[1], path3);
-            finalAmount = amounts3[1];
-
-        } else {
-           // For two-token arbitrage, calculate the expected final amount
-            address[] memory path = new address[](2);
-            path[0] = token0;
-            path[1] = token1;
-            uint256[] memory amounts = IUniswapV2Router02(uniswapV2Router).getAmountsOut(amount, path);
-            finalAmount = amounts[1];
-        }
-
-        if(finalAmount <= amount) revert NoProfit();
         bytes memory params = abi.encode(arbType, token0, token1, token2, amount, _slippageTolerance);
-        // Reset approval before setting it
+
+        // Approve the lending pool for flash loan repayment
         IERC20(dai).safeApprove(address(lendingPool), 0);
         IERC20(dai).safeApprove(address(lendingPool), amount);
-        IAavePool(lendingPool).flashLoanSimple(address(this), dai, amount, params, 0); // referralCode = 0
+
+        // Initiate flash loan
+        //estimate gas here to make sure its a valid tx.
+
+        IAavePool(lendingPool).flashLoanSimple(address(this), dai, amount, params, 0);
         emit FlashLoanExecuted(dai, amount);
-        return true; // Explicitly return true
-    }
-
-
-    function executeOperation(
-        address asset,
-        uint256 amount,
-        uint256 premium,
-        address /*initiator*/,
-        bytes calldata params
-    )
-        external
-        override
-        nonReentrant
-        checkCircuitBreaker
-        notEmergency
-        returns (bool)
-    {
-        require(msg.sender == lendingPool, "Only lendingPool");
-        require(asset == dai, "Asset must be DAI");
-
-        (ArbitrageType arbType, address token0, address token1, address token2, uint256 amountIn, uint256 _slippageTolerance)
-            = abi.decode(params, (ArbitrageType, address, address, address, uint256, uint256));
-
-        uint256 balanceBefore = IERC20(dai).balanceOf(address(this));
-
-         // OPTIONAL: Validate liquidity for the primary trading pair.
-        validateLiquidity(token0, token1, 1000e18);
-
-        // Execute trade based on arbitrage type
-        if (arbType == ArbitrageType.TWO_TOKEN) {
-            _executeTradeWithSlippage(amountIn, token0, token1, _slippageTolerance);
-        } else if (arbType == ArbitrageType.THREE_TOKEN) {
-            executeTriangularArbitrage(token0, token1, token2, amountIn, _slippageTolerance);
-        } else {
-            revert InvalidArbitrageType(); // Use the custom error
-        }
-        uint256 balanceAfter = IERC20(dai).balanceOf(address(this));
-        uint256 totalOwed = amount + premium;
-
-        // Check for sufficient balance after the trade to repay the loan and profit
-        if (balanceAfter < totalOwed) revert InsufficientBalance(totalOwed, balanceAfter);
-        if (balanceAfter < totalOwed + profitThreshold) revert InsufficientProfit(profitThreshold, balanceAfter - totalOwed);
-
-        // Calculate profit
-        uint256 profit = balanceAfter - totalOwed;
-        IERC20(dai).safeTransfer(owner(), profit);  // Transfer profit to owner
-
-        // Approve and repay the flash loan
-        IERC20(dai).safeApprove(address(lendingPool), 0); // Always set to 0 first
-        IERC20(dai).safeApprove(address(lendingPool), totalOwed);
-
-        emit TradeExecuted(amount, profit);
-        emit RepaymentExecuted(asset, totalOwed);
         return true;
+  }
+
+
+  function executeOperation(
+    address asset,
+    uint256 amount,
+    uint256 premium,
+    address /*initiator*/,
+    bytes calldata params  // Use calldata
+  )
+    external
+    override
+    nonReentrant
+    checkCircuitBreaker
+    notEmergency
+    returns (bool)
+  {
+    require(msg.sender == lendingPool, "Only lendingPool");
+    require(asset == dai, "Asset must be DAI");
+
+    (ArbitrageType arbType, address token0, address token1, address token2, uint256 amountIn, uint256 _slippageTolerance)
+      = abi.decode(params, (ArbitrageType, address, address, address, uint256, uint256));
+
+      // OPTIONAL: Check liquidity for the primary pair
+     if (arbType == ArbitrageType.TWO_TOKEN) {
+        validateLiquidity(token0, token1, 1000e18); // Example minimum liquidity
+     }
+
+    uint256 balanceBefore = IERC20(dai).balanceOf(address(this));
+
+    if (arbType == ArbitrageType.TWO_TOKEN) {
+      _executeTradeWithSlippage(amountIn, token0, token1, _slippageTolerance);
+    } else if (arbType == ArbitrageType.THREE_TOKEN) {
+      executeTriangularArbitrage(token0, token1, token2, amountIn, _slippageTolerance);
+    } else {
+      revert InvalidArbitrageType();
     }
 
+    uint256 balanceAfter = IERC20(dai).balanceOf(address(this));
+    uint256 totalOwed = amount + premium;
+
+
+		 // These checks are still important, but the initial decision is made off-chain
+    if (balanceAfter < totalOwed) {
+      revert InsufficientBalance(totalOwed, balanceAfter);
+    }
+    if (balanceAfter < totalOwed + profitThreshold) {
+		emit NoProfit(); //emit this for easy tracking.
+      revert InsufficientProfit(profitThreshold, balanceAfter - totalOwed);
+    }
+
+    uint256 profit = balanceAfter - totalOwed;
+
+    // Transfer profit to owner
+    IERC20(dai).safeTransfer(owner(), profit);
+
+    // Repay flash loan
+    IERC20(dai).safeApprove(address(lendingPool), 0);
+    IERC20(dai).safeApprove(address(lendingPool), totalOwed);
+
+    emit TradeExecuted(amount, profit);
+    emit RepaymentExecuted(asset, totalOwed);
+    return true;
+  }
+
+    // Optimized _executeTradeWithSlippage (using internal, calldata)
     function _executeTradeWithSlippage(
         uint256 amountIn,
         address tokenIn,
         address tokenOut,
-        uint256 _slippageTolerance
+        uint256 _slippage
     ) internal {
+        // Approve Uniswap to spend tokens
+        IERC20(tokenIn).safeApprove(uniswapRouter, 0); //always reset it.
+        IERC20(tokenIn).safeApprove(uniswapRouter, amountIn);
+
+        // Calculate minimum amount out with slippage
+        uint256 amountOutMin = _calculateAmountOutMin(amountIn, tokenIn, tokenOut, _slippage);
+
+        // Construct path for Uniswap trade (calldata for efficiency)
         address[] memory path = new address[](2);
         path[0] = tokenIn;
         path[1] = tokenOut;
-        IERC20(tokenIn).safeApprove(address(uniswapV2Router), 0);
-        IERC20(tokenIn).safeApprove(address(uniswapV2Router), amountIn);
-        uint256[] memory amounts = IUniswapV2Router02(uniswapV2Router).getAmountsOut(amountIn, path);
-        uint256 amountOutMin = (amounts[1] * (10000 - _slippageTolerance)) / 10000;
-        if (_slippageTolerance > maxSlippage) revert MaxSlippageExceeded();
-        IUniswapV2Router02(uniswapV2Router).swapExactTokensForTokens(
+
+        // Execute the trade
+        IUniswapV2Router02(uniswapRouter).swapExactTokensForTokens(
             amountIn,
             amountOutMin,
             path,
-            address(this),
-            block.timestamp
+            address(this), // Send output to this contract
+            block.timestamp // Use current block timestamp as deadline
         );
+				IERC20(tokenIn).safeApprove(uniswapRouter, 0); //always reset it.
+
     }
-     // New: Triangular arbitrage function with slippage control.
-    function executeTriangularArbitrage(
-        address tokenA,
-        address tokenB,
-        address tokenC,
+
+    // Optimized executeTriangularArbitrage (using internal, calldata)
+   function executeTriangularArbitrage(
+    address token0,
+    address token1,
+    address token2,
+    uint256 amountIn,
+    uint256 _slippageTolerance
+) internal {
+    // Step 1: token0 -> token1
+    IERC20(token0).safeApprove(uniswapRouter, 0);
+    IERC20(token0).safeApprove(uniswapRouter, amountIn);
+    uint256 amountOutMin1 = _calculateAmountOutMin(amountIn, token0, token1, _slippageTolerance);
+    address[] memory path1 = new address[](2);
+    path1[0] = token0;
+    path1[1] = token1;
+    IUniswapV2Router02(uniswapRouter).swapExactTokensForTokens(amountIn, amountOutMin1, path1, address(this), block.timestamp);
+    uint256 amountOut1 = IERC20(token1).balanceOf(address(this));
+	IERC20(token0).safeApprove(uniswapRouter, 0); //always set it back to zero.
+
+    // Step 2: token1 -> token2
+	IERC20(token1).safeApprove(uniswapRouter, 0);
+    IERC20(token1).safeApprove(uniswapRouter, amountOut1);
+    uint256 amountOutMin2 = _calculateAmountOutMin(amountOut1, token1, token2, _slippageTolerance);
+    address[] memory path2 = new address[](2);
+    path2[0] = token1;
+    path2[1] = token2;
+    IUniswapV2Router02(uniswapRouter).swapExactTokensForTokens(amountOut1, amountOutMin2, path2, address(this), block.timestamp);
+    uint256 amountOut2 = IERC20(token2).balanceOf(address(this));
+	IERC20(token1).safeApprove(uniswapRouter, 0);
+
+    // Step 3: token2 -> token0
+	IERC20(token2).safeApprove(uniswapRouter, 0);
+    IERC20(token2).safeApprove(uniswapRouter, amountOut2);
+    uint256 amountOutMin3 = _calculateAmountOutMin(amountOut2, token2, token0, _slippageTolerance);
+    address[] memory path3 = new address[](2);
+    path3[0] = token2;
+    path3[1] = token0;
+    IUniswapV2Router02(uniswapRouter).swapExactTokensForTokens(amountOut2, amountOutMin3, path3, address(this), block.timestamp);
+	IERC20(token2).safeApprove(uniswapRouter, 0);
+
+}
+
+    function _calculateAmountOutMin(
         uint256 amountIn,
-        uint256 _slippageTolerance
-    ) internal {
-        if (_slippageTolerance > maxSlippage) revert MaxSlippageExceeded();
-
-        address[] memory path1 = new address[](2);
-        path1[0] = tokenA;
-        path1[1] = tokenB;
-        address[] memory path2 = new address[](2);
-        path2[0] = tokenB;
-        path2[1] = tokenC;
-        address[] memory path3 = new address[](2);
-        path3[0] = tokenC;
-        path3[1] = tokenA;
-
-        uint256[] memory amounts1 = IUniswapV2Router02(uniswapV2Router).getAmountsOut(amountIn, path1);
-        uint256[] memory amounts2 = IUniswapV2Router02(uniswapV2Router).getAmountsOut(amounts1[1], path2);
-        uint256[] memory amounts3 = IUniswapV2Router02(uniswapV2Router).getAmountsOut(amounts2[1], path3);
-
-        uint256 finalAmount = amounts3[1];
-        if(finalAmount <= amountIn) revert NoProfit();
-
-        uint256 amount1OutMin = (amounts1[1] * (10000 - _slippageTolerance)) / 10000;
-        uint256 amount2OutMin = (amounts2[1] * (10000 - _slippageTolerance)) / 10000;
-        uint256 amount3OutMin = (amounts3[1] * (10000 - _slippageTolerance)) / 10000;
-
-        IERC20(tokenA).safeApprove(address(uniswapV2Router), 0);
-        IERC20(tokenA).safeApprove(address(uniswapV2Router), amountIn);
-        IUniswapV2Router02(uniswapV2Router).swapExactTokensForTokens(amountIn, amount1OutMin, path1, address(this), block.timestamp);
-
-        IERC20(tokenB).safeApprove(address(uniswapV2Router), 0);
-        IERC20(tokenB).safeApprove(address(uniswapV2Router), amounts1[1]);
-        IUniswapV2Router02(uniswapV2Router).swapExactTokensForTokens(amounts1[1], amount2OutMin, path2, address(this), block.timestamp);
-
-        IERC20(tokenC).safeApprove(address(uniswapV2Router), 0);
-        IERC20(tokenC).safeApprove(address(uniswapV2Router), amounts2[1]);
-        IUniswapV2Router02(uniswapV2Router).swapExactTokensForTokens(amounts2[1], amount3OutMin, path3, address(this), block.timestamp);
-
-        uint256 profit = finalAmount - amountIn;
-        IERC20(tokenA).transfer(owner(), profit);
-        emit TradeExecuted(amountIn, profit);
+        address tokenIn,
+        address tokenOut,
+        uint256 _slippage
+    ) internal view returns (uint256) {
+        address[] memory path = new address[](2);
+        path[0] = tokenIn;
+        path[1] = tokenOut;
+        uint256[] memory amounts = IUniswapV2Router02(uniswapRouter).getAmountsOut(amountIn, path);
+		//added extra require.
+		require(_slippage <= 10000, "_slippage value exceeds maximum (10000)");
+        return amounts[1] * (10000 - _slippage) / 10000;
     }
-    // NEW: Internal liquidity validation function.
-    function validateLiquidity(address tokenA, address tokenB, uint256 minLiquidity) internal view {
-        // Get the factory address from the Uniswap router.
-        address factory = IUniswapV2Router02(uniswapV2Router).factory();
-        // Get the pair address from the factory.
-        address pair = IUniswapV2Factory(factory).getPair(tokenA, tokenB);
-        if (pair == address(0)) revert InvalidPath();
-        // Retrieve reserves from the pair contract.
-        (uint112 reserve0, uint112 reserve1, ) = IUniswapV2Pair(pair).getReserves();
-        // For simplicity, we check if either reserve is below the minimum liquidity.
-        if (reserve0 < minLiquidity || reserve1 < minLiquidity) {
-            // Revert with the lower of the two reserve values and the required minimum.
-            uint256 available = reserve0 < minLiquidity ? reserve0 : reserve1;
-            revert LowLiquidity(available, minLiquidity);
+
+      // Function to validate liquidity (to mitigate sandwich attacks)
+    function validateLiquidity(address _token0, address _token1, uint256 _minLiquidity) public view returns (bool) {
+
+        address pair = IUniswapV2Factory(IUniswapV2Router02(uniswapRouter).factory()).getPair(_token0, _token1);
+
+        require(pair != address(0), "Pair does not exist");
+        uint256 liquidity = IERC20(_token0).balanceOf(pair);
+        if(liquidity < _minLiquidity)
+        {
+            return false;
         }
+        return true;
     }
-
-      // NEW: Get the latest ETH/USD price from Chainlink.
+		 // --- Chainlink Price Feed ---
     function getChainlinkETHUSD() public view returns (int256) {
-        (, int256 price, , , ) = priceFeed.latestRoundData();
+        (, int256 price, , , ) = AggregatorV3Interface(chainlinkOracle).latestRoundData();
         return price;
     }
-
-    receive() external payable {}
 }
