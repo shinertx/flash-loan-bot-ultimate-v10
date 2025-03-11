@@ -26,7 +26,6 @@ contract MEVModule is Ownable {
         dai = _dai;
     }
 
-    // Placeholder: Analyze mempool data and return an opportunity.
     function analyzeMempoolForOpportunity() external view returns (Opportunity memory) {
         Opportunity memory opp = Opportunity({
             targetToken: address(0),
