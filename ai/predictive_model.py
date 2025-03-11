@@ -4,13 +4,13 @@ import requests
 import numpy as np
 import pandas as pd
 from datetime import datetime, timedelta, timezone
-# import tensorflow as tf  # Uncomment when you have a real model
+# import tensorflow as tf  # Uncomment when you have a real model (and install tensorflow)
 
 # --- Configuration (Load from environment variables) ---
 ETHERSCAN_API_KEY = os.getenv("ETHERSCAN_API_KEY")
 # Add other API keys as needed (e.g., for centralized exchange data)
-UNISWAP_V2_GRAPH_ENDPOINT = "https://api.thegraph.com/subgraphs/name/uniswap/uniswap-v2"  # Example
-# Add other GraphQL endpoints for other DEXes (SushiSwap, etc.)
+UNISWAP_V2_GRAPH_ENDPOINT = "https://api.thegraph.com/subgraphs/name/uniswap/uniswap-v2"  # Example, Mainnet
+# Add other GraphQL endpoints for other DEXes (SushiSwap, etc.) and networks!
 
 # --- Data Fetching Functions ---
 
