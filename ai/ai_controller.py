@@ -7,27 +7,32 @@ app = Flask(__name__)
 
 @app.route('/predict', methods=['GET'])
 def predict():
-    decision = random.choice(["trade", "wait"])
+    # Example advanced random logic
+    vol = random.uniform(0, 1)
+    sentiment = random.uniform(-1, 1)
+    combined_score = (vol + (1 - abs(sentiment))) / 2
+    action = "trade" if combined_score > 0.5 else "wait"
     return jsonify({
-        "action": decision,
-        "prediction": random.uniform(0, 1),
+        "action": action,
+        "prediction": combined_score,
         "features": {
-            "gasPrice": random.uniform(10, 100),
-            "uniPool": random.uniform(1000, 5000),
-            "sentiment": random.uniform(0, 1)
+            "vol": vol,
+            "sentiment": sentiment
         }
     })
 
 @app.route('/regime', methods=['GET'])
 def regime():
-    regime_indicator = random.choice([0, 1])
+    # 0 = normal, 1 = volatile
+    regime_indicator = 1 if random.random() > 0.7 else 0
     return jsonify({"regime": regime_indicator})
 
 @app.route('/parameters', methods=['GET'])
 def parameters():
+    # Dynamically adjust thresholds
     return jsonify({
-        "profitThreshold": random.randint(5000, 6000),
-        "maxDailyLoss": random.randint(1000, 1200)
+        "profitThreshold": random.randint(200, 1000),
+        "maxDailyLoss": random.randint(500, 1500)
     })
 
 if __name__ == '__main__':
