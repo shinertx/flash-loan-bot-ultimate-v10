@@ -7,22 +7,34 @@ import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 contract BridgeModule is Ownable {
-    using SafeERC20 for IERC20;
+  using SafeERC20 for IERC20;
 
-    address public axelarGateway;
-    address public dai;
+  address public axelarGateway;
+  address public dai;
 
-    constructor(address _axelarGateway, address _dai) {
-        axelarGateway = _axelarGateway;
-        dai = _dai;
-    }
+  // Adjust these to your needs:
+  string public destinationChain = "Moonbeam"; 
+  string public destinationAddress = "0xRecipientOnDestChain"; 
 
-    function bridgeTokens(address token, uint256 amount) external onlyOwner {
-        IERC20(token).safeApprove(axelarGateway, amount);
-        IAxelarGateway(axelarGateway).callContract(
-            "destinationChain",
-            "0xRecipientOnDestChain",
-            abi.encode(token, amount)
-        );
-    }
+  constructor(address _axelarGateway, address _dai) {
+    axelarGateway = _axelarGateway;
+    dai = _dai;
+  }
+
+  function setDestinationChain(string calldata chain, string calldata contractAddr) external onlyOwner {
+    destinationChain = chain;
+    destinationAddress = contractAddr;
+  }
+
+  function bridgeTokens(address token, uint256 amount) external onlyOwner {
+    // Example bridging: Approve Axelar, then call
+    IERC20(token).safeApprove(axelarGateway, 0);
+    IERC20(token).safeApprove(axelarGateway, amount);
+
+    IAxelarGateway(axelarGateway).callContract(
+      destinationChain,
+      destinationAddress,
+      abi.encode(token, amount)
+    );
+  }
 }
