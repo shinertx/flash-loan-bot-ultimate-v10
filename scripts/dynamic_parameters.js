@@ -5,18 +5,18 @@ require("dotenv").config();
 async function main() {
   const BOT_ADDRESS = process.env.BOT_ADDRESS;
   if (!BOT_ADDRESS) {
-    console.error("BOT_ADDRESS not set in .env file");
+    console.error("BOT_ADDRESS not set in .env");
     process.exit(1);
   }
   const [owner] = await ethers.getSigners();
   const bot = await ethers.getContractAt("MegaFlashBot", BOT_ADDRESS, owner);
-  console.log("Dynamic Parameter Adjustment started for MegaFlashBot at", BOT_ADDRESS);
+  console.log("Dynamic Parameter Adjustment started for MegaFlashBot:", BOT_ADDRESS);
 
   setInterval(async () => {
     try {
       const response = await axios.get(process.env.DYNAMIC_PARAMETERS_URL);
       const params = response.data;
-      console.log("Parameter recommendations received:", params);
+      console.log("Parameter recommendations:", params);
 
       if (params.profitThreshold && typeof params.profitThreshold === "number") {
         console.log("Updating profitThreshold to:", params.profitThreshold);
@@ -31,13 +31,12 @@ async function main() {
         console.log("maxDailyLoss updated.");
       }
     } catch (error) {
-      console.error("Error in dynamic parameter adjustment:", error);
+      console.error("Dynamic Parameter Error:", error);
     }
-  }, 300000);
+  }, 300000); // every 5 minutes
 }
 
 main().catch((error) => {
   console.error("Dynamic Parameter Adjustment failed:", error);
   process.exit(1);
 });
-
