@@ -1,84 +1,42 @@
+// arbitrage_logic.js (Updated with Gas Oracle)
+
 const { ethers } = require("hardhat");
+const { calculateUniswapV2Output } = require("../utils/arbitrage_utils");
 require('dotenv').config();
-const { FlashbotsBundleProvider } = require("@flashbots/ethers-provider-bundle");
-const axios = require('axios');
+const axios = require('axios'); // Add axios for HTTP requests
 
-async function executeArbitrage(provider, bot, tradeDetails, owner, arbType = 0) {
-    console.log("Executing Arbitrage...");
-    const { FLASHBOTS_AUTH_KEY, SLIPPAGE_TOLERANCE } = process.env;
-    const authSigner = new ethers.Wallet(FLASHBOTS_AUTH_KEY, provider);
-    if (!FLASHBOTS_AUTH_KEY) {
-        console.log("No Flashbots auth key. Skipping submission.");
-        return;
-    }
-    const flashbotsProvider = await FlashbotsBundleProvider.create(provider, authSigner, "https://relay.flashbots.net");
+// --- Configuration ---
+const UNISWAP_ROUTER_ADDRESS = process.env.UNISWAP_ROUTER;
+const DAI_ADDRESS = process.env.DAI_ADDRESS;
+const WETH_ADDRESS = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2";
+const CHAINLINK_ETH_USD_ADDRESS = process.env.CHAINLINK_ORACLE;
+const BOT_ADDRESS = process.env.BOT_ADDRESS;
 
-    const routerABI = require('../abis/IUniswapV2Router02.json');
-    const router = new ethers.Contract(tradeDetails.router, routerABI, owner);
+// --- Interfaces (for easy interaction) ---
+const uniswapRouterABI = [
+    "function getAmountsOut(uint amountIn, address[] calldata path) external view returns (uint[] memory amounts)"
+];
+const chainlinkABI = [
+    "function latestRoundData() external view returns (uint80 roundId, int256 answer, uint256 startedAt, uint256 updatedAt, uint80 answeredInRound)"
+];
 
-    const flashloanAmount = tradeDetails.amountIn;
-    const token0 = tradeDetails.path[0];
-    const token1 = tradeDetails.path[1];
-    const token2 = tradeDetails.path.length > 2 ? tradeDetails.path[2] : ethers.constants.AddressZero;
+const provider = ethers.provider;
 
-    const flashLoanTx = await bot.populateTransaction.executeFlashLoan(
-        flashloanAmount,
-        token0,
-        token1,
-        token2,
-        arbType,
-        SLIPPAGE_TOLERANCE
-    );
-
-    let blockNumber = await provider.getBlockNumber();
-    let targetBlockNumber = blockNumber + 1;
-    const bundle = [{ signer: owner, transaction: flashLoanTx }];
-
-    let signedBundle;
-    try {
-        signedBundle = await flashbotsProvider.signBundle(bundle);
-    } catch (error){
-        console.log("Error signing bundle", error);
-    }
-
-    let simulation;
-    try {
-        simulation = await flashbotsProvider.simulate(signedBundle, targetBlockNumber);
-        if ("error" in simulation) {
-            console.warn(`Bundle Simulation Error: ${simulation.error.message}`);
-            return;
-        }
-        console.log(`Simulation Success! Estimated gas: ${simulation.totalGasUsed}`);
-        } catch (error) {
-        console.error("Simulation error:", error);
-        return; // Exit if simulation fails
-    }
-    console.log(`Submitting bundle for block: ${targetBlockNumber}`);
-    try {
-        const submission = await flashbotsProvider.sendRawBundle(signedBundle, targetBlockNumber);
-        console.log('Bundle submitted to Flashbots! Bundle Hash:', submission.bundleHash);
-
-    } catch (error) {
-        console.log("Error submitting to flashbots", error);
-    }
-
-    //Multi stage Bidding
-    const MAX_BLOCKS = 5;  // Maximum number of blocks to try
-     for (let i = 1; i < MAX_BLOCKS; i++) {
-        const newTargetBlock = blockNumber + 1 + i;
-        console.log(`Submitting bundle, attempt ${i+1}, target block ${newTargetBlock}`);
-        try {
-              const resubmission = await flashbotsProvider.sendRawBundle(
-                signedBundle,
-                newTargetBlock
-            );
-            console.log("Bundle resubmitted! Bundle Hash:", resubmission.bundleHash);
-
-        } catch (error) {
-            console.log("Error submitting to flashbots", error);
-        }
-
-    }
+// --- Helper Functions ---
+async function getEthUsdPrice() {
+    const chainlink = new ethers.Contract(CHAINLINK_ETH_USD_ADDRESS, chainlinkABI, provider);
+    const roundData = await chainlink.latestRoundData();
+    return roundData.answer;
 }
 
-module.exports = { executeArbitrage };
+async function getReserves(tokenA, tokenB) {
+    const factoryAddress = await (new ethers.Contract(UNISWAP_ROUTER_ADDRESS, ["function factory() external view returns (address)"], provider)).factory();
+    const factory = new ethers.Contract(factoryAddress, ["function getPair(address tokenA, address tokenB) external view returns (address)"], provider);
+
+    const pairAddress = await factory.getPair(tokenA, tokenB);
+    if (pairAddress === ethers.ZeroAddress) {
+        return null;
+    }
+
+    const pair = new ethers.Contract(pairAddress, ["function getReserves() external view returns (uint112 reserve0, uint112 reserve1, uint32 blockTimestampLast)", "function token0() external view returns (address)"], provider);
+    const token0 = await pair.
