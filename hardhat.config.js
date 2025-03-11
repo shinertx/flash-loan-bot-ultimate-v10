@@ -12,8 +12,9 @@ module.exports = {
     },
     hardhat: {
       forking: {
+        // For local mainnet fork, adjust as needed:
         url: RPC_URL,
-        blockNumber: 17400000
+        blockNumber: 17400000 
       },
       allowUnlimitedContractSize: true
     }
